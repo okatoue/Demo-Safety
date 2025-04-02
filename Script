@@ -1,0 +1,178 @@
+import pandas as pd
+import tkinter as tk
+from tkinter import filedialog
+
+OLD_FILE = ""
+NEW_FILE = ""
+PM_SHEET = ""
+OUTPUT_FILE = ""
+
+# Constants for indexing
+HOURS = 8
+DATE = 3
+PROJECT_CODE = 0
+
+def process_excel_to_dict(file_path):
+    "Convert Excel sheet to a nested dictionary: {Name -> {Date -> [Task Code, Hours]}}"
+    df = pd.read_excel(file_path)
+    df.columns = df.columns.str.strip()
+    df["Work Date"] = pd.to_datetime(df["Work Date"], dayfirst=True, errors='coerce').dt.strftime("%m/%d/%Y")
+
+    data_dict = {}
+    for _, row in df.iterrows():
+        name = str(row.get("Name", "")).strip()
+        date = str(row.get("Work Date", ""))
+        task_code = row.get("Task Code", "")
+        hours = row.get("Hours", 0)
+
+        data_dict.setdefault(name, {}).setdefault(date, []).append([task_code, hours])
+    return data_dict
+
+def get_changed_names():
+    "Find names with changed or new/removed work entries."
+    old_data = process_excel_to_dict(OLD_FILE)
+    new_data = process_excel_to_dict(NEW_FILE)
+
+    return list({
+        name for name in set(old_data) | set(new_data)
+        if old_data.get(name) != new_data.get(name)
+    })
+
+def extract_rows(file_path, names_to_include):
+    "Extract rows for specified names."
+    df = pd.read_excel(file_path)
+    df.columns = df.columns.str.strip()
+    df["Work Date"] = pd.to_datetime(df["Work Date"], dayfirst=True, errors='coerce').dt.strftime("%m/%d/%Y")
+
+    rows = {name: [] for name in names_to_include}
+
+    for _, row in df.iterrows():
+        name = str(row.get("Name", "")).strip()
+        if name in names_to_include:
+            rows[name].append([
+                row.get("Project Code", "").strip(),
+                row.get("Position ID", "").strip(),
+                name,
+                str(row.get("Work Date", "")),
+                row.get("Task Code", ""),
+                row.get("Rate Code", ""),
+                row.get("Activity Code", ""),
+                row.get("Billable ?", ""),
+                row.get("Hours", 0),
+                row.get("Notes", "")
+            ])
+    return rows
+
+def compare_rows(old_dict, new_dict, changed_names):
+    "Compare rows and find changes using hash-based set comparisons."
+    changes = []
+
+    for name in changed_names:
+        old_rows = old_dict.get(name, [])
+        new_rows = new_dict.get(name, [])
+
+        old_set = set(tuple(row[:8] + row[9:]) for row in old_rows)
+        new_set = set(tuple(row[:8] + row[9:]) for row in new_rows)
+
+        for i, row in enumerate(old_rows):
+            row_key = tuple(row[:8] + row[9:])
+            if row_key not in new_set:
+                copied_row = row[:]
+                copied_row[HOURS] = -abs(copied_row[HOURS])
+                changes.append(copied_row)
+
+        # Build a quick lookup dictionary: {(date, project_code): row}
+        new_index = {
+            (row[DATE], row[PROJECT_CODE]): row
+            for row in new_rows
+        }
+
+        for o_row in old_rows:
+            key = (o_row[DATE], o_row[PROJECT_CODE])
+            n_row = new_index.get(key)
+
+            if n_row and o_row[HOURS] != n_row[HOURS]:
+                delta_row = o_row[:]
+                delta_row[HOURS] = n_row[HOURS] - o_row[HOURS]
+                changes.append(delta_row)
+
+
+    return changes
+
+def attach_project_managers(changes):
+    "Attach PM names to changes; return changes and missing PM projects."
+    df_pm = pd.read_excel(PM_SHEET, sheet_name="PM List")
+    missing_pm = []
+    df_pm.set_index("Project", inplace=True)
+
+    cleaned_changes = []
+    for row in changes:
+        row = row[:11]  # Trim to the correct length
+        project_code = row[0]
+        if project_code in df_pm.index:
+            row.append(df_pm.loc[project_code]["Project Manager"])
+        else:
+            if project_code not in missing_pm:
+                missing_pm.append(project_code)
+            row.append("")
+
+        cleaned_changes.append(row)
+
+    return cleaned_changes, missing_pm
+
+
+def save_to_excel(changes):
+    "Save changes to output Excel file."
+    columns = ['Project Code', 'Position ID', 'Name', 'Work Date', 'Task Code',
+               'Rate Code', 'Activity Code', 'Billable ?', 'Hours', 'Notes', 'PM']
+
+    df_changes = pd.DataFrame(changes, columns=columns)
+    df_existing = pd.read_excel(OUTPUT_FILE)
+    df_combined = pd.concat([df_changes, df_existing], ignore_index=True)
+
+    file_path = "C:/Users/omark/Desktop/output.xlsx"
+    with pd.ExcelWriter(file_path, engine="xlsxwriter") as writer:
+        df_combined.to_excel(writer, index=False, sheet_name='Changes')
+
+        highlight = writer.book.add_format({'bg_color': '#DCE6F1'})
+        for i in range(1, len(df_changes) + 1):
+            writer.sheets['Changes'].set_row(i, None, highlight)
+
+def select_files():
+    "Open file dialogs to set the global file paths."
+    global OLD_FILE, NEW_FILE, PM_SHEET, OUTPUT_FILE
+
+    root = tk.Tk()
+    root.withdraw()
+
+    print("Select OLD file")
+    OLD_FILE = filedialog.askopenfilename()
+
+    print("Select NEW file")
+    NEW_FILE = filedialog.askopenfilename()
+
+    print("Select PM sheet")
+    PM_SHEET = filedialog.askopenfilename()
+
+    print("Select New week file")
+    OUTPUT_FILE = filedialog.askopenfilename()
+
+def main():
+    select_files()
+
+    changed_names = get_changed_names()
+    old_rows = extract_rows(OLD_FILE, changed_names)
+    new_rows = extract_rows(NEW_FILE, changed_names)
+
+    changes = compare_rows(old_rows, new_rows, changed_names)
+    changes, missing_pm = attach_project_managers(changes)
+
+    if missing_pm:
+        print("Missing PMs for projects:")
+        for project in missing_pm:
+            print(project)
+
+    save_to_excel(changes)
+
+if __name__ == "__main__":
+    main()
